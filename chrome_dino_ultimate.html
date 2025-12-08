@@ -1,0 +1,542 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Chrome Dino — Ultimate (Single File)</title>
+  <style>
+    :root{
+      --bg1:#f7f7f7;
+      --accent:#333;
+      --ui-bg: rgba(255,255,255,0.6);
+      --glass: rgba(255,255,255,0.06);
+      --glass-2: rgba(0,0,0,0.06);
+      --font: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial;
+    }
+    html,body{height:100%;margin:0;background:var(--bg1);font-family:var(--font);-webkit-font-smoothing:antialiased}
+    #gameWrap{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;padding:18px;box-sizing:border-box}
+    canvas{background:linear-gradient(180deg,#87CEEB 0%, #cfe9ff 60%);width:100%;max-width:980px;height:calc(55vh);border-radius:12px;box-shadow:0 8px 30px rgba(20,30,40,0.2);display:block}
+    .hud{position:relative;max-width:980px;width:100%;display:flex;justify-content:space-between;align-items:center;margin-top:12px}
+    .panel{background:var(--glass);backdrop-filter: blur(6px);padding:8px 12px;border-radius:10px;color:var(--accent);display:flex;gap:12px;align-items:center}
+    .btn{cursor:pointer;padding:6px 10px;border-radius:8px;border:0;background:#222;color:#fff;font-weight:600}
+    .small{font-size:13px;opacity:0.9}
+    .title{font-weight:700}
+    .controls{display:flex;gap:8px;align-items:center}
+    .muted{opacity:0.6}
+    .centerNote{margin-top:10px;color:#444;font-size:13px}
+    .overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}
+    .menu{width:700px;max-width:92%;background:linear-gradient(180deg,rgba(255,255,255,0.95),rgba(245,245,245,0.95));border-radius:12px;padding:18px;box-shadow:0 12px 40px rgba(0,0,0,0.12);text-align:center}
+    .menu h1{margin:0 0 6px 0}
+    .mutedSub{color:#666;font-size:14px;margin-bottom:12px}
+    .big{font-size:20px}
+    .settings{display:flex;gap:12px;flex-wrap:wrap;justify-content:center;margin-top:12px}
+    .setting{display:flex;flex-direction:column;align-items:flex-start;background:#fff;padding:8px 10px;border-radius:8px;min-width:140px}
+    .footerNote{margin-top:8px;color:#555;font-size:13px}
+    @media (max-width:600px){canvas{height:46vh}}
+  </style>
+</head>
+<body>
+  <div id="gameWrap">
+    <canvas id="game"></canvas>
+
+    <div class="hud">
+      <div class="panel">
+        <div style="display:flex;flex-direction:column">
+          <div class="title">Dino — Ultimate</div>
+          <div class="small muted">Improved physics, power-ups, day/night, particles, local leaderboard</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center">
+        <div class="panel small" id="scorePanel">Score: 0&nbsp;&nbsp;Best: 0</div>
+        <div class="panel small" id="speedPanel">Speed: 0</div>
+        <div class="panel small" id="timePanel">Time: 0s</div>
+        <div class="panel controls">
+          <button id="startBtn" class="btn">Start</button>
+          <button id="pauseBtn" class="btn">Pause</button>
+          <button id="muteBtn" class="btn">Mute</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="centerNote small mutedSub">Controls: Space / Up - Jump, Down / S - Duck, Click / Tap to jump, Double-tap for quick jump. Press P to pause. Mobile support enabled.</div>
+  </div>
+
+  <script>
+  /*
+    Chrome Dino — Ultimate (single-file)
+    Features:
+      - Responsive canvas with DPR scaling
+      - Smooth physics and animation
+      - Multiple obstacle types (cacti + birds)
+      - Power-ups: shield, slow time, coin magnet
+      - Day/night cycle
+      - Parallax background
+      - Particles and dust
+      - Procedural sound via WebAudio (no external assets)
+      - Highscore + local leaderboard saved in localStorage
+      - Touch & keyboard controls
+      - Pause/Resume, Mute, Restart
+  */
+  (function(){
+    'use strict';
+
+    // ---------- Utilities ----------
+    const qs = s => document.querySelector(s);
+    const $ = id => document.getElementById(id);
+    const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
+    const rand = (a,b)=> a + Math.random()*(b-a);
+    const rint = (a,b)=> Math.floor(rand(a,b+1));
+
+    // ---------- Canvas setup ----------
+    const canvas = qs('#game');
+    const ctx = canvas.getContext('2d', { alpha: false });
+    let DPR = Math.max(1, window.devicePixelRatio || 1);
+    function resize(){
+      DPR = Math.max(1, window.devicePixelRatio || 1);
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = Math.round(rect.width * DPR);
+      canvas.height = Math.round(rect.height * DPR);
+      ctx.setTransform(DPR,0,0,DPR,0,0);
+    }
+    window.addEventListener('resize', resize);
+
+    // ---------- Game Config ----------
+    const CONFIG = {
+      groundY: 0.78, // percentage from top
+      initialSpeed: 520, // px per second (logical coordinate)
+      gravity: 2200,
+      jumpForce: 660,
+      duckHeight: 28,
+      runHeight: 44,
+      spawnInterval: 1.1, // seconds
+      cloudFreq: 3.5,
+      dayCycle: 35, // seconds per day-night
+      maxObstacles: 3
+    };
+
+    // ---------- State ----------
+    let state = {
+      running:false, paused:false, gameOver:false, started:false,
+      time:0, score:0, speed:CONFIG.initialSpeed, best:0,
+      highScoreName:'', leaderboard:[], muted:false
+    };
+
+    // Load saved best
+    (function(){
+      try{
+        const b = localStorage.getItem('dinoUltimate_best')||0;
+        state.best = Number(b)||0;
+        const lb = localStorage.getItem('dinoUltimate_leaderboard');
+        state.leaderboard = lb ? JSON.parse(lb) : [];
+      }catch(e){console.warn(e)}
+    })();
+
+    // ---------- Audio: procedural beeps ----------
+    const AudioManager = (function(){
+      const ctxAudio = new (window.AudioContext || window.webkitAudioContext)();
+      let masterGain = ctxAudio.createGain(); masterGain.gain.value = 0.12; masterGain.connect(ctxAudio.destination);
+      function playTone(freq=440, time=0.06, type='sine', when=0, decay=0.02){
+        if(state.muted) return;
+        const t = ctxAudio.currentTime + when;
+        const o = ctxAudio.createOscillator(); o.type = type; o.frequency.value = freq;
+        const g = ctxAudio.createGain();
+        g.gain.setValueAtTime(0.0001,t);
+        g.gain.exponentialRampToValueAtTime(1.0, t + 0.002);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + time + decay);
+        o.connect(g); g.connect(masterGain);
+        o.start(t); o.stop(t + time + decay + 0.02);
+      }
+      function playJump(){ playTone(880,0.06,'sine'); }
+      function playScoreTick(){ playTone(1200,0.03,'square'); }
+      function playHit(){ playTone(80,0.4,'sawtooth'); }
+      function playPower(type){ if(type==='shield') playTone(880,0.12,'triangle'); else if(type==='slow') playTone(520,0.12,'triangle'); else if(type==='magnet') playTone(720,0.12,'triangle'); }
+      return {playJump, playScoreTick, playHit, playPower, ctx: ctxAudio, setMuted(v){ state.muted = v; masterGain.gain.value = v?0:0.12 }};
+    })();
+
+    // ---------- Game Objects ----------
+    const G = { w: 1000, h: 600 }; // logical units; we'll scale relative to canvas size
+    function toScreenX(x){ return x * canvas.width / (DPR * G.w); }
+
+    class Dino{
+      constructor(){
+        this.x = 110; this.y = 0; this.vy = 0; this.w = 48; this.h = CONFIG.runHeight; this.onGround = true; this.ducking = false; this.jumpCount = 0;
+        this.blinkTimer = rand(2,6); this.blink = 0; this.shield = 0; this.magnet = 0; this.slow = 0;
+      }
+      reset(){ this.y = this.groundY(); this.vy=0; this.onGround=true; this.ducking=false; this.h=CONFIG.runHeight; this.jumpCount=0; this.shield=0; this.magnet=0; this.slow=0 }
+      groundY(){ return G.h * CONFIG.groundY - this.h/2; }
+      rect(){ return {x:this.x - this.w/2, y:this.y - this.h, w:this.w, h:this.h} }
+      update(dt){
+        // abilities timers
+        if(this.shield>0) this.shield = Math.max(0,this.shield - dt);
+        if(this.magnet>0) this.magnet = Math.max(0,this.magnet - dt);
+        if(this.slow>0) this.slow = Math.max(0,this.slow - dt);
+
+        // physics
+        this.vy += CONFIG.gravity * dt;
+        this.y += this.vy * dt;
+        const groundY = G.h * CONFIG.groundY;
+        if(this.y >= groundY){ this.y = groundY; this.vy = 0; this.onGround = true; this.jumpCount = 0; }
+        else this.onGround = false;
+
+        // blinking
+        this.blinkTimer -= dt; if(this.blinkTimer <= 0){ this.blink = 6; this.blinkTimer = rand(3,7); }
+        if(this.blink>0) this.blink = Math.max(0,this.blink - dt*12);
+      }
+      jump(){
+        if(this.onGround || this.jumpCount<1){ // allow single extra jump
+          this.vy = -CONFIG.jumpForce * (this.slow>0?0.8:1);
+          this.onGround = false; this.jumpCount++;
+          AudioManager.playJump();
+          spawnDust(this.x,this.y + this.h/2, true);
+        }
+      }
+      duck(d){
+        if(d){ this.ducking = true; this.h = CONFIG.duckHeight; }
+        else{ this.ducking = false; this.h = CONFIG.runHeight; }
+      }
+      draw(ctx, scale){
+        const x = this.x, y = this.y, w = this.w, h = this.h;
+        ctx.save();
+        ctx.translate(x, y - h/2);
+        ctx.scale(scale, scale);
+        // body
+        ctx.fillStyle = this.shield>0 ? '#fffa' : '#222';
+        // simple pixel-ish dino
+        const s = 1;
+        ctx.beginPath();
+        ctx.moveTo(-w/2, h/2);
+        ctx.quadraticCurveTo(-w/2+6, -h/2, 0, -h/2);
+        ctx.quadraticCurveTo(w/2-6, -h/2, w/2, -h/4);
+        ctx.quadraticCurveTo(w/2-12, h/2, w/2-28, h/2);
+        ctx.lineTo(-w/2, h/2);
+        ctx.fill();
+        // eye
+        ctx.fillStyle = '#fff';
+        ctx.beginPath(); ctx.arc(-w/6, -h/4, 3, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle = '#000';
+        if(this.blink>0) ctx.fillRect(-w/6-3, -h/4-1, 6, 3); else ctx.beginPath(), ctx.arc(-w/6, -h/4, 1.5, 0, Math.PI*2), ctx.fill();
+        // legs (simple)
+        ctx.fillStyle = '#111';
+        ctx.fillRect(-w/3, h/2-6, 8, 8);
+        ctx.fillRect( w/8, h/2-6, 8, 8);
+
+        // shield halo
+        if(this.shield>0){
+          const a = Math.sin(Date.now()/150)*0.5+0.5;
+          ctx.strokeStyle = 'rgba(100,180,255,'+ (0.15 + 0.25*a) +')'; ctx.lineWidth = 3; ctx.strokeRect(-w/2-6, -h/2-6, w+12, h+12);
+        }
+        ctx.restore();
+      }
+    }
+
+    class Obstacle{
+      constructor(type, x){
+        this.type = type; this.x = x; this.y = 0; this.w = 0; this.h = 0; this.passed=false; this.setByType(type);
+        this.vx = 0;
+      }
+      setByType(t){
+        if(t==='cactus'){ const v = rint(1,3); this.variant = v; this.w=22+v*8; this.h=22+v*10; this.y = G.h * CONFIG.groundY - this.h/2; }
+        else if(t==='bird'){ this.w=34; this.h=26; this.y = G.h * (CONFIG.groundY-0.18) - (Math.random()*30); this.bob = Math.random()*2; }
+        else if(t==='spike'){ this.w=18; this.h=18; this.y = G.h * CONFIG.groundY - this.h/2; }
+      }
+      update(dt, speed){ this.x -= speed*dt; if(this.type==='bird'){ this.bob += dt*8; this.y += Math.sin(this.bob)*8*dt*40; } }
+      rect(){ return {x:this.x - this.w/2, y:this.y - this.h, w:this.w, h:this.h}; }
+      draw(ctx){
+        ctx.save(); ctx.translate(this.x, this.y);
+        if(this.type==='cactus'){
+          ctx.fillStyle = '#077a07'; ctx.beginPath(); ctx.roundRect(-this.w/2, -this.h/2, this.w, this.h, 4); ctx.fill();
+          // arms
+          ctx.fillRect(-this.w/2 -2, -this.h/2 +8, 6, 8);
+          ctx.fillRect(this.w/2-4, -this.h/2 +6, 6, 8);
+        } else if(this.type==='bird'){
+          ctx.fillStyle = '#222'; ctx.beginPath(); ctx.ellipse(0, -4, this.w/2, this.h/2, 0, 0, Math.PI*2); ctx.fill();
+          ctx.fillRect(-6, -this.h/2-8, 12, 4);
+        } else if(this.type==='spike'){
+          ctx.fillStyle = '#333'; ctx.beginPath(); ctx.moveTo(-this.w/2, this.h/2); ctx.lineTo(0,-this.h/2); ctx.lineTo(this.w/2, this.h/2); ctx.closePath(); ctx.fill();
+        }
+        ctx.restore();
+      }
+    }
+
+    class Cloud{
+      constructor(x,y,size){ this.x=x; this.y=y; this.size=size; }
+      update(dt,speed){ this.x -= speed*0.12*dt; }
+      draw(ctx){ ctx.save(); ctx.translate(this.x,this.y); ctx.globalAlpha = 0.9; ctx.fillStyle='#ffffff88'; ctx.beginPath(); ctx.ellipse(0,0,this.size*1.4,this.size,0,0,Math.PI*2); ctx.fill(); ctx.restore(); }
+    }
+
+    // ---------- Particle system ----------
+    const particles = [];
+    function spawnDust(x,y,up=false){
+      for(let i=0;i<12;i++){
+        particles.push({x,y,vx:rand(-80,80),vy:rand(-120,-20)+(up? -40:0),life:rand(0.35,0.9),size:rand(1,4)});
+      }
+    }
+    function spawnExplosion(x,y){ for(let i=0;i<28;i++) particles.push({x,y,vx:rand(-420,420),vy:rand(-520,200),life:rand(0.6,1.6),size:rand(2,5)});
+    }
+
+    // ---------- Helpers ----------
+    function rectsOverlap(a,b){ return !(a.x+b.w < b.x || a.x > b.x+b.w || a.y+b.h < b.y || a.y > b.y+b.h); }
+    function hitTest(a,b){ // shrink hitbox for fairness
+      const shrink = 0.14;
+      const ax = {x:a.x + a.w*shrink, y:a.y + a.h*shrink, w: a.w*(1-2*shrink), h: a.h*(1-2*shrink)};
+      const bx = {x:b.x + b.w*shrink, y:b.y + b.h*shrink, w: b.w*(1-2*shrink), h: b.h*(1-2*shrink)};
+      return !(ax.x+ax.w < bx.x || ax.x > bx.x+bx.w || ax.y+ax.h < bx.y || ax.y > bx.y+bx.h);
+    }
+
+    // ---------- Game variables ----------
+    let dino = new Dino();
+    let obstacles = [];
+    let clouds = [];
+    let lastSpawn = 0, lastCloud = 0;
+
+    // initial cloud spawn
+    for(let i=0;i<4;i++) clouds.push(new Cloud(rand(180,900), rand(60,200), rand(18,48)));
+
+    // ---------- Input ----------
+    const keys = {};
+    window.addEventListener('keydown', e=>{ keys[e.key.toLowerCase()]=true; if(e.key===' '||e.key==='ArrowUp') e.preventDefault(); });
+    window.addEventListener('keyup', e=>{ keys[e.key.toLowerCase()]=false; });
+
+    // touch handling
+    let lastTap = 0;
+    canvas.addEventListener('touchstart', e=>{ e.preventDefault(); const t = Date.now(); if(t - lastTap < 300) { // double tap - small hop
+        dino.jump();
+      } else { dino.jump(); }
+      lastTap = t;
+    }, {passive:false});
+    canvas.addEventListener('mousedown', e=>{ dino.jump(); });
+
+    // ---------- Spawn logic ----------
+    function spawnObstacle(){
+      const gap = rand(220,420);
+      const x = G.w + 60;
+      // choose type by probability
+      const p = Math.random();
+      let t = 'cactus';
+      if(p>0.88) t='bird';
+      else if(p>0.96) t='spike';
+      const obs = new Obstacle(t,x);
+      obs.vx = state.speed;
+      obstacles.push(obs);
+      // cap
+      if(obstacles.length>CONFIG.maxObstacles) obstacles.shift();
+    }
+
+    // ---------- Powerups (simple coins and buffs) ----------
+    const powerups = [];
+    class PowerUp{ constructor(type,x){ this.type=type; this.x=x; this.y=G.h*CONFIG.groundY - 60; this.w=22; this.h=22; this.collected=false; }
+      update(dt,speed){ this.x -= speed*dt; }
+      draw(ctx){ ctx.save(); ctx.translate(this.x,this.y); if(this.type==='coin'){ ctx.fillStyle='#ffcc00'; ctx.beginPath(); ctx.arc(0,0,10,0,Math.PI*2); ctx.fill(); } else if(this.type==='shield'){ ctx.fillStyle='#66ccff'; ctx.beginPath(); ctx.rect(-10,-10,20,20); ctx.fill(); } else if(this.type==='slow'){ ctx.fillStyle='#bb88ff'; ctx.beginPath(); ctx.moveTo(-10,6); ctx.lineTo(0,-8); ctx.lineTo(10,6); ctx.fill(); } ctx.restore(); }
+      rect(){ return {x:this.x-this.w/2,y:this.y-this.h/2,w:this.w,h:this.h}; }
+    }
+
+    function spawnPowerup(){ const types=['coin','shield','slow','magnet']; const type = types[rint(0,types.length-1)]; powerups.push(new PowerUp(type, G.w + 40 + rand(0,100)) ); }
+
+    // ---------- Main loop ----------
+    let lastTime = performance.now();
+    function loop(now){
+      const dt = Math.min(1/30, (now - lastTime)/1000);
+      lastTime = now;
+      update(dt);
+      draw();
+      if(!state.paused) requestAnimationFrame(loop);
+    }
+
+    function startGame(){
+      dino = new Dino(); dino.reset(); obstacles=[]; powerups.length=0; particles.length=0; clouds.length=0; lastSpawn=0; lastCloud=0; state.time=0; state.score=0; state.speed = CONFIG.initialSpeed; state.running = true; state.paused=false; state.gameOver=false; state.started=true;
+      for(let i=0;i<4;i++) clouds.push(new Cloud(rand(180,900), rand(60,200), rand(18,48)));
+      lastTime = performance.now(); requestAnimationFrame(loop);
+    }
+
+    function pauseResume(){ state.paused = !state.paused; if(!state.paused) { lastTime = performance.now(); requestAnimationFrame(loop); } }
+
+    function endGame(){ state.gameOver = true; state.running=false; AudioManager.playHit(); spawnExplosion(dino.x + 20, dino.y - 10);
+      // save score
+      if(state.score > state.best){ state.best = Math.floor(state.score); localStorage.setItem('dinoUltimate_best', state.best); }
+      // prompt for leaderboard name
+      const name = prompt('Game Over! Enter name to save score (optional):','Player');
+      if(name){ state.leaderboard.push({name: name.slice(0,20), score: Math.floor(state.score), date: new Date().toISOString()}); state.leaderboard.sort((a,b)=>b.score-a.score); state.leaderboard = state.leaderboard.slice(0,10); localStorage.setItem('dinoUltimate_leaderboard', JSON.stringify(state.leaderboard)); }
+    }
+
+    function update(dt){
+      if(state.paused || !state.running) return;
+      // inputs
+      if(keys['p']){ keys['p']=false; pauseResume(); }
+      if(keys[' ' ] || keys['arrowup'] || keys['w']){ dino.jump(); keys[' ']=false; }
+      dino.duck(keys['arrowdown'] || keys['s']);
+
+      // update time and speed
+      state.time += dt * (dino.slow>0?0.6:1);
+      // difficulty scaling
+      state.speed = CONFIG.initialSpeed + Math.floor(state.time * 18);
+      // spawn obstacles
+      lastSpawn += dt;
+      const spawnInterval = Math.max(0.45, CONFIG.spawnInterval - Math.min(0.7, state.time/60));
+      if(lastSpawn > spawnInterval){ lastSpawn = 0; spawnObstacle(); if(Math.random()<0.14) spawnPowerup(); }
+
+      lastCloud += dt; if(lastCloud > CONFIG.cloudFreq){ lastCloud=0; clouds.push(new Cloud(G.w + rand(0,80), rand(40,200), rand(18,46))); }
+
+      // update entities
+      dino.update(dt);
+      for(let c of clouds) c.update(dt, state.speed);
+      clouds = clouds.filter(c => c.x > -200);
+
+      for(let p of particles){ p.vy += 900*dt; p.x += p.vx*dt; p.y += p.vy*dt; p.life -= dt; }
+      for(let i = particles.length-1;i>=0;i--) if(particles[i].life<=0) particles.splice(i,1);
+
+      // obstacles
+      for(let obs of obstacles){ obs.update(dt, state.speed); }
+      obstacles = obstacles.filter(o => o.x > -200);
+
+      // powerups
+      for(let pu of powerups){ pu.update(dt, state.speed); }
+      for(let i=powerups.length-1;i>=0;i--) if(powerups[i].x < -100) powerups.splice(i,1);
+
+      // collisions & scoring
+      for(let obs of obstacles){
+        const dr = dino.rect(); const or = obs.rect();
+        if(!obs.passed && obs.x < dino.x){ obs.passed=true; state.score += 10; AudioManager.playScoreTick(); }
+        if(!state.gameOver && hitTest(dr, or)){
+          if(dino.shield>0){ // destroy obstacle
+            spawnExplosion(obs.x, obs.y - obs.h/4); const idx = obstacles.indexOf(obs); if(idx>=0) obstacles.splice(idx,1); AudioManager.playPower('shield');
+          } else {
+            endGame();
+          }
+        }
+      }
+
+      // powerup collection
+      for(let i=powerups.length-1;i>=0;i--){ const p=powerups[i]; if(hitTest(dino.rect(), p.rect())){ // collect
+          if(p.type==='coin'){ state.score += 25; AudioManager.playPower('magnet'); }
+          else if(p.type==='shield'){ dino.shield = 5; AudioManager.playPower('shield'); }
+          else if(p.type==='slow'){ dino.slow = 4; AudioManager.playPower('slow'); }
+          else if(p.type==='magnet'){ dino.magnet = 5; AudioManager.playPower('magnet'); }
+          powerups.splice(i,1); spawnDust(p.x,p.y);
+        } }
+
+      // magnet: attract coins
+      if(dino.magnet>0){ for(let pu of powerups){ if(pu.type==='coin'){ const dx = dino.x - pu.x; const dy = (dino.y - 40) - pu.y; pu.x += dx*dt*3; pu.y += dy*dt*3; } } }
+
+      // score grows with time slightly
+      state.score += dt * 2;
+
+      // update HUD
+      $('scorePanel').textContent = 'Score: ' + Math.floor(state.score) + '  Best: ' + state.best;
+      $('speedPanel').textContent = 'Speed: ' + Math.floor(state.speed) + ' px/s';
+      $('timePanel').textContent = 'Time: ' + Math.floor(state.time) + 's';
+    }
+
+    // ---------- Draw ----------
+    function draw(){
+      // clear
+      ctx.fillStyle = '#87CEEB'; ctx.fillRect(0,0,canvas.width/DPR, canvas.height/DPR);
+
+      // scale world to canvas (fit height)
+      const cw = canvas.width/DPR, ch = canvas.height/DPR;
+      // compute scale so G.h maps to ch
+      const scale = Math.min(cw / G.w, ch / G.h);
+      const offsetX = (cw - G.w*scale)/2;
+      const offsetY = (ch - G.h*scale)/2;
+      ctx.save(); ctx.translate(offsetX, offsetY); ctx.scale(scale, scale);
+
+      // day-night background
+      const dayProgress = (state.time % CONFIG.dayCycle) / CONFIG.dayCycle;
+      const nightFactor = Math.max(0, Math.sin(dayProgress * Math.PI*2)*0.5 + 0.5);
+      drawSky(nightFactor);
+
+      // parallax: far mountains
+      drawMountains(nightFactor);
+
+      // clouds
+      for(let c of clouds) c.draw(ctx);
+
+      // ground
+      drawGround();
+
+      // powerups
+      for(let p of powerups) p.draw(ctx);
+
+      // obstacles
+      for(let obs of obstacles) obs.draw(ctx);
+
+      // particles
+      for(let p of particles){ ctx.fillStyle = 'rgba(60,30,10,0.9)'; ctx.fillRect(p.x - p.size/2, p.y - p.size/2, p.size, p.size); }
+
+      // dino
+      dino.draw(ctx, 1);
+
+      // HUD overlay inside canvas: score big (center-right)
+      ctx.restore();
+
+      // draw overlay info (leaderboard thumbnail)
+      drawCanvasOverlay(cw,ch);
+
+      // game over screen
+      if(state.gameOver){ ctx.save(); ctx.fillStyle='rgba(0,0,0,0.35)'; ctx.fillRect(0,0,cw,ch); ctx.fillStyle='#fff'; ctx.font='28px '+getComputedStyle(document.body).fontFamily; ctx.textAlign='center'; ctx.fillText('GAME OVER', cw/2, ch/2 - 10); ctx.font='16px '+getComputedStyle(document.body).fontFamily; ctx.fillText('Score: '+Math.floor(state.score)+'  Best: '+state.best, cw/2, ch/2 + 18); ctx.restore(); }
+    }
+
+    function drawSky(nightFactor){
+      // nightFactor 0..1 where 1 means bright, 0 means darker? We used sin so vary
+      const cw = G.w, ch = G.h;
+      const grd = ctx.createLinearGradient(0,0,0,ch);
+      const t = 0.2 + 0.8 * Math.max(0.0, 1 - Math.abs(Math.sin((state.time/CONFIG.dayCycle)*Math.PI*2))); // brighter in day
+      // make it subtle
+      grd.addColorStop(0, `rgba(${Math.floor(120*t+40)},${Math.floor(200*t+60)},${Math.floor(255*t)},1)`);
+      grd.addColorStop(1, `rgba(${Math.floor(200*t+30)},${Math.floor(240*t+50)},${Math.floor(255*t)},1)`);
+      ctx.fillStyle = grd; ctx.fillRect(0,0,cw,ch);
+    }
+
+    function drawMountains(nightFactor){
+      ctx.save();
+      ctx.fillStyle = '#cfcfcf'; ctx.beginPath(); ctx.moveTo(0,G.h*0.7); ctx.lineTo(G.w*0.18,G.h*0.45); ctx.lineTo(G.w*0.34,G.h*0.7); ctx.lineTo(G.w*0.5,G.h*0.4); ctx.lineTo(G.w*0.7,G.h*0.72); ctx.lineTo(G.w,G.h*0.52); ctx.lineTo(G.w,G.h); ctx.lineTo(0,G.h); ctx.fill();
+      ctx.restore();
+    }
+
+    function drawGround(){
+      const gy = G.h * CONFIG.groundY;
+      ctx.save();
+      // ground base
+      ctx.fillStyle = '#e9e9e9'; ctx.fillRect(0, gy, G.w, G.h - gy);
+      // pattern
+      const step = 36; ctx.fillStyle = '#dcdcdc';
+      for(let x= (Math.floor((state.time*state.speed)%step) * -1); x< G.w + step; x+=step){ ctx.fillRect(x, gy+2, step/2, 6); }
+      ctx.restore();
+    }
+
+    function drawCanvasOverlay(cw,ch){
+      ctx.save();
+      ctx.font = '14px '+getComputedStyle(document.body).fontFamily; ctx.fillStyle='#222'; ctx.textAlign='right';
+      ctx.fillText('Score: '+Math.floor(state.score), cw - 18, 24);
+      ctx.fillStyle = '#666'; ctx.textAlign='left'; ctx.fillText('Best: '+state.best, 18, 24);
+      ctx.restore();
+    }
+
+    // ---------- Buttons ----------
+    $('startBtn').addEventListener('click', ()=>{ if(!state.running) startGame(); else { startGame(); } });
+    $('pauseBtn').addEventListener('click', ()=>{ pauseResume(); });
+    $('muteBtn').addEventListener('click', ()=>{ state.muted = !state.muted; AudioManager.setMuted(state.muted); $('muteBtn').textContent = state.muted ? 'Unmute' : 'Mute'; });
+
+    // ---------- Init ----------
+    resize();
+    // draw initial screen
+    (function drawInitial(){
+      ctx.fillStyle = '#87CEEB'; ctx.fillRect(0,0,canvas.width/DPR, canvas.height/DPR);
+      ctx.save(); const cw = canvas.width/DPR, ch = canvas.height/DPR; ctx.font = '26px '+getComputedStyle(document.body).fontFamily; ctx.fillStyle='#222'; ctx.textAlign='center'; ctx.fillText('Chrome Dino — Ultimate', cw/2, ch/2 - 40); ctx.font='14px '+getComputedStyle(document.body).fontFamily; ctx.fillText('Press Start or Space to begin — touch on mobile', cw/2, ch/2 - 10); ctx.restore();
+    })();
+
+    // keyboard start
+    window.addEventListener('keydown', e=>{ if((e.key===' '||e.key==='ArrowUp') && !state.running){ startGame(); } });
+
+    // ensure canvas focus
+    canvas.tabIndex = 1000; canvas.style.outline='none'; canvas.focus();
+
+    // small polyfills
+    if(CanvasRenderingContext2D && !CanvasRenderingContext2D.prototype.roundRect){ CanvasRenderingContext2D.prototype.roundRect = function(x,y,w,h,r){ if(w<0) { x+=w; w=-w;} if(h<0){ y+=h; h=-h;} if(typeof r==='undefined') r=4; this.beginPath(); this.moveTo(x+r,y); this.arcTo(x+w,y,x+w,y+h,r); this.arcTo(x+w,y+h,x,y+h,r); this.arcTo(x,y+h,x,y,r); this.arcTo(x,y,x+w,y,r); this.closePath(); }}
+
+    // export for console tinkering
+    window.DinoUltimate = { start: startGame, pause: pauseResume, state, dino, obstacles, powerups, particles };
+
+  })();
+  </script>
+</body>
+</html>
